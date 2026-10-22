@@ -53,20 +53,20 @@ on:
                 type: string
                 default: "22"
             node-resolutions:
-                description: "JSON of yarn resolutions applied when the project has no yarn.lock"
+                description: "JSON of yarn resolutions applied when the project has no yarn.lock (empty: test what a fresh project gets)"
                 required: false
                 type: string
-                default: '{"webpack": "5.106.2"}'
+                default: ""
             package-name:
                 description: "Composer name to test the checkout under (e.g. ibexa/oss for the se7enxweb/oss fork, so its recipe applies)"
                 required: false
                 type: string
                 default: ""
             run-4x:
-                description: "Run the browser tests for the 4.x line (needs a fixed 4.6.x-dev recipe)"
+                description: "Run the browser tests for the 4.x line (false skips them with a warning)"
                 required: false
                 type: boolean
-                default: false
+                default: true
             database:
                 description: "sqlite (default; Exponential Platform supports it) or mysql (MySQL 8.4 in a container)"
                 required: false
@@ -272,12 +272,8 @@ jobs:
                   four=false
                   case "$alias ${GITHUB_BASE_REF:-$GITHUB_REF_NAME} $name" in 4.*|*" 4."*|*exponential-platform-v4x-dxp-skeleton*) four=true ;; esac
                   if [ "$four" = true ] && [ "$RUN_4X" != true ]; then
-                      # The 4.6.x-dev recipe of se7enxweb/exponential-platform-dxp (se7enxweb/sevenx-recipes)
-                      # ships the 5.0 frontend build (@ibexa/frontend-config v5, which expects
-                      # var/encore/ibexa.webpack.richtext.config.js), so `yarn ibexa:build` cannot
-                      # build the 4.x admin. Set run-4x: true once the recipe is fixed.
                       skip=true
-                      echo "::warning::4.x browser tests skipped: the 4.6.x-dev recipe of se7enxweb/exponential-platform-dxp ships the 5.0 frontend build, so the 4.x admin assets cannot be built. Fix the recipe in se7enxweb/sevenx-recipes, then pass run-4x: true."
+                      echo "::warning::4.x browser tests skipped: the caller passed run-4x: false."
                   fi
                   [ "$kind" = skeleton ] && SKELETON="$name" && SKELETON_VERSION="$version"
                   {
@@ -421,19 +417,26 @@ jobs:
                   if [ -f package.json ]; then
                       corepack enable || true
                       if [ ! -f yarn.lock ] && [ -n "$NODE_RESOLUTIONS" ]; then
-                          # No lock file: pin what the input names (by default the webpack the
-                          # Exponential Platform starter locks; newer webpack 5 releases moved the
-                          # internals Encore 5's copyFiles loader needs).
+                          # No lock file and the caller asked for pinned packages: apply them as
+                          # yarn resolutions. Empty by default, so the test builds what a fresh
+                          # project gets.
                           echo "No yarn.lock; resolutions: ${NODE_RESOLUTIONS}"
                           jq --argjson r "$NODE_RESOLUTIONS" '.resolutions = ((.resolutions // {}) + $r)' package.json > package.json.new
                           mv -f package.json.new package.json
                       fi
                       yarn install --non-interactive --network-timeout 600000
                       if jq -e '.scripts["ibexa:build"]' package.json >/dev/null; then yarn ibexa:build; fi
-                      # The site (app) build is reported but not fatal: the admin login test
-                      # needs only the admin assets built above.
-                      if jq -e ".scripts.build" package.json >/dev/null && ! yarn build; then
-                          echo "::warning::yarn build (site assets) failed in this project; see the log above."
+                      # The site (app) build is what a fresh project runs first; it must work,
+                      # including the copyFiles step that copies assets/images.
+                      if jq -e ".scripts.build" package.json >/dev/null; then
+                          yarn build
+                          test -f public/build/entrypoints.json || { echo "::error::yarn build wrote no public/build/entrypoints.json"; exit 1; }
+                          if [ -d assets/images ] && [ -n "$(ls -A assets/images)" ]; then
+                              copied=$(find public/build/images -type f 2>/dev/null | wc -l)
+                              [ "$copied" -gt 0 ] || { echo "::error::yarn build copied no file of assets/images to public/build/images"; exit 1; }
+                              echo "copyFiles: ${copied} file(s) in public/build/images"
+                          fi
+                          echo "Site build output:"; ls public/build | head -n 20
                       fi
                   fi
 
