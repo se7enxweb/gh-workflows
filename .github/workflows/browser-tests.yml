@@ -67,6 +67,11 @@ on:
                 required: false
                 type: boolean
                 default: false
+            database:
+                description: "sqlite (default; Exponential Platform supports it) or mysql (MySQL 8.4 in a container)"
+                required: false
+                type: string
+                default: "sqlite"
             install-type:
                 description: "Installer type given to exponential:install"
                 required: false
@@ -360,14 +365,32 @@ jobs:
                   fi
                   cat composer.json
 
+            - name: Start MySQL
+              if: inputs.database == 'mysql'
+              run: |
+                  docker run -d --name exponential-db -p 3306:3306 \
+                      -e MYSQL_ROOT_PASSWORD=root -e MYSQL_DATABASE=exponential mysql:8.4 \
+                      --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_520_ci
+                  for i in $(seq 1 60); do
+                      docker exec exponential-db mysqladmin ping -uroot -proot --silent && break
+                      sleep 2
+                  done
+
             - name: Configure the environment
               working-directory: project
+              env:
+                  DATABASE: ${{ inputs.database }}
               run: |
+                  if [ "$DATABASE" = mysql ]; then
+                      url='mysql://root:root@127.0.0.1:3306/exponential?serverVersion=8.4&charset=utf8mb4'
+                  else
+                      url='sqlite:///%kernel.project_dir%/var/data_%kernel.environment%.db'
+                  fi
                   {
                       echo "APP_ENV=prod"
                       echo "APP_DEBUG=0"
                       echo "APP_SECRET=$(openssl rand -hex 32)"
-                      echo 'DATABASE_URL="sqlite:///%kernel.project_dir%/var/data_%kernel.environment%.db"'
+                      echo "DATABASE_URL=\"${url}\""
                       echo "MESSENGER_TRANSPORT_DSN=sync://"
                       echo "SEARCH_ENGINE=legacy"
                   } > .env.local
