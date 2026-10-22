@@ -355,6 +355,8 @@ jobs:
                       [ "$SOURCE" = checkout ] && composer config repositories.tested "$repo"
                       for p in $REMOVE; do composer remove "$p" --no-update; done
                       composer require "${NAME}:${VERSION}" --no-update
+                      # A released skeleton ships a lock file for the released package; resolve anew.
+                      rm -f composer.lock
                   fi
                   cat composer.json
 
