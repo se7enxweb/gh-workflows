@@ -1,46 +1,183 @@
 name: Create Release for tag
 
+# Exponential Platform (se7enxweb) release notes for a pushed tag.
+#
+# A release is created only when none exists for the tag yet. Releases that
+# are already published are never edited or replaced: a tag and its release
+# are immutable once they are out. When the maintainers create the release by
+# hand right after pushing the tag, this workflow sees it and does nothing.
+#
+# The notes are built from the git history between the previous tag (version
+# order, pre-releases skipped for a full release) and this one, grouped by the
+# commit prefixes the project uses (Added:, Updated:, Fixed:, Removed:,
+# Renamed:). For a project/metapackage repository with a composer.lock at both
+# tags, the changed package versions are listed as well.
+
 on:
   workflow_call:
+    inputs:
+      tag:
+        description: 'Tag to create the release for (default: the pushed tag)'
+        required: false
+        type: string
+        default: ''
+      wait-minutes:
+        description: 'Minutes to wait for a release created by hand before creating one'
+        required: false
+        type: number
+        default: 10
+      dry-run:
+        description: 'Build and print the notes, but do not create the release'
+        required: false
+        type: boolean
+        default: false
+      lock-packages:
+        description: 'Regular expression of composer.lock package names listed in the notes'
+        required: false
+        type: string
+        default: '^(se7enxweb|ibexa|netgen|ezsystems)/'
     secrets:
       JIRA_TOKEN:
-        required: true
+        description: 'Unused, accepted for compatibility with older callers'
+        required: false
+
+permissions:
+  contents: write
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Set Environment
-        run: |
-          echo "BUILD_TAG=${GITHUB_REF/refs\/tags\//}" >> $GITHUB_ENV
-
-      - name: Get previous release tag based on type
-        id: prevrelease
-        uses: ibexa/version-logic-action@e15eb95abe03085d43bb35030a7fc9bb625ae7b7 # v1.3.2
         with:
-          currentTag: ${{ env.BUILD_TAG }}
+          fetch-depth: 0
 
-      - name: Generate changelog
-        id: changelog
-        uses: ibexa/changelog-generator-action@v2 # referencing `v2` branch, not tag. Do not change unless new tag exists
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          jira_token: ${{ secrets.JIRA_TOKEN }}
-          currentTag: ${{ env.BUILD_TAG }}
-          previousTag: ${{ steps.prevrelease.outputs.previousTag }}
-
-      - name: Print the changelog
-        run: |
-          printf '%s\n' "${{ steps.changelog.outputs.changelog }}"
-
-      - name: Create Release
-        id: create_release
+      - name: Resolve tag
+        id: tag
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          cat > release_notes.md <<'EOF'
-          ${{ steps.changelog.outputs.changelog }}
-          EOF
-          gh release create "$BUILD_TAG" --title "$BUILD_TAG" --notes-file release_notes.md
+          tag="${INPUT_TAG}"
+          if [ -z "$tag" ] && [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"
+          fi
+          if [ -z "$tag" ]; then
+            echo "::notice::No tag given and the run was not started by a tag push; nothing to release."
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch --tags --force --quiet
+          if ! git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "::error::Tag ${tag} does not exist in ${GITHUB_REPOSITORY}"
+            exit 1
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "Tag: ${tag}"
+
+      - name: Check for an existing release
+        id: existing
+        if: steps.tag.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          WAIT: ${{ inputs.dry-run && '0' || inputs.wait-minutes }}
+        run: |
+          deadline=$(( $(date +%s) + WAIT * 60 ))
+          while :; do
+            if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "::notice::Release ${TAG} already exists; published releases are left unchanged."
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            [ "$(date +%s)" -ge "$deadline" ] && break
+            echo "No release for ${TAG} yet, waiting for one created by hand ..."
+            sleep 30
+          done
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+
+      - name: Build release notes
+        if: steps.tag.outputs.tag != '' && steps.existing.outputs.exists != 'true'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          LOCK_PACKAGES: ${{ inputs.lock-packages }}
+        run: |
+          sorted=$(git -c versionsort.suffix=-alpha -c versionsort.suffix=-beta -c versionsort.suffix=-rc \
+                     tag -l --sort=version:refname)
+          is_pre() { printf '%s' "$1" | grep -qiE '(alpha|beta|rc)'; }
+          prev=""
+          while IFS= read -r t; do
+            [ "$t" = "$TAG" ] && break
+            if is_pre "$t" && ! is_pre "$TAG"; then continue; fi
+            prev="$t"
+          done <<< "$sorted"
+
+          {
+            echo "## ${GITHUB_REPOSITORY#*/} ${TAG}"
+            echo
+            if [ -n "$prev" ]; then
+              range="${prev}..${TAG}"
+              echo "Changes since ${prev}:"
+            else
+              range="${TAG}"
+              echo "First release."
+            fi
+            echo
+            log=$(git log --no-merges --format='%s (%h)' "$range")
+            for kind in Added Updated Fixed Removed Renamed; do
+              lines=$(printf '%s\n' "$log" | grep -E "^${kind}:" | sed -E "s/^${kind}:[[:space:]]*/- /")
+              if [ -n "$lines" ]; then
+                echo "### ${kind}"
+                echo
+                printf '%s\n' "$lines"
+                echo
+              fi
+            done
+            other=$(printf '%s\n' "$log" | grep -vE '^(Added|Updated|Fixed|Removed|Renamed):' | grep -v '^$' | sed 's/^/- /')
+            if [ -n "$other" ]; then
+              echo "### Other changes"
+              echo
+              printf '%s\n' "$other"
+              echo
+            fi
+            if [ -n "$prev" ] && git cat-file -e "${TAG}:composer.lock" 2>/dev/null && git cat-file -e "${prev}:composer.lock" 2>/dev/null; then
+              pkgs() { git show "$1:composer.lock" | jq -r --arg re "$LOCK_PACKAGES" '[.packages[]?, .["packages-dev"][]?] | .[] | select(.name | test($re)) | "\(.name) \(.version)"' | sort; }
+              changes=$(join -a1 -a2 -e '-' -o '0,1.2,2.2' <(pkgs "$prev") <(pkgs "$TAG") | awk '$2 != $3 { printf "- %s: %s -> %s\n", $1, $2, $3 }')
+              if [ -n "$changes" ]; then
+                echo "### Package versions"
+                echo
+                printf '%s\n' "$changes"
+                echo
+              fi
+            fi
+            echo "Full history: https://github.com/${GITHUB_REPOSITORY}/compare/${prev:-$TAG}...${TAG}"
+          } > release_notes.md
+          cat release_notes.md
+          {
+            echo '### Release notes'
+            echo
+            cat release_notes.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create release
+        if: steps.tag.outputs.tag != '' && steps.existing.outputs.exists != 'true' && !inputs.dry-run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          pre=()
+          if printf '%s' "$TAG" | grep -qiE '(alpha|beta|rc)'; then pre=(--prerelease); fi
+          if gh release create "$TAG" -R "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --notes-file release_notes.md "${pre[@]}"; then
+            exit 0
+          fi
+          # Created by hand in the meantime: that release stands as it is.
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice::Release ${TAG} was created in the meantime; left unchanged."
+            exit 0
+          fi
+          exit 1
+
+      - name: Dry run
+        if: steps.tag.outputs.tag != '' && steps.existing.outputs.exists != 'true' && inputs.dry-run
+        run: echo "::notice::Dry run; the release for ${{ steps.tag.outputs.tag }} was not created."

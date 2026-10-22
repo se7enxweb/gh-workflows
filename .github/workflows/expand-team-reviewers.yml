@@ -17,16 +17,46 @@ on:
         type: string
     secrets:
       AUTOMATION_CLIENT_ID:
-        required: true
+        description: 'Optional GitHub App that can read the organisation teams'
+        required: false
       AUTOMATION_CLIENT_SECRET:
-        required: true
+        required: false
+      robot-token:
+        description: 'Optional token with read:org that can read the organisation teams'
+        required: false
+
+# Exponential Platform (se7enxweb): teams only exist in organisations. For a
+# repository owned by a user account (se7enxweb is one) there is nothing to
+# expand and the run ends successfully. In an organisation, the team is read
+# with the GitHub App when AUTOMATION_CLIENT_ID is set, otherwise with
+# robot-token, otherwise with the workflow token (which can read the members
+# of a visible team only).
+
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
   expand-team-reviewers:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Check the repository owner
+        id: owner
+        env:
+          OWNER_TYPE: ${{ github.event.repository.owner.type }}
+          HAS_APP: ${{ secrets.AUTOMATION_CLIENT_ID != '' }}
+        run: |
+          if [ "$OWNER_TYPE" != "Organization" ]; then
+            echo "::notice::${GITHUB_REPOSITORY_OWNER} is not an organisation, so it has no teams to expand."
+            echo "org=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "org=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "app=${HAS_APP}" >> "$GITHUB_OUTPUT"
+
       - name: Generate GitHub App Token
+        if: steps.owner.outputs.org == 'true' && steps.owner.outputs.app == 'true'
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         id: generate_token
         with:
@@ -35,13 +65,16 @@ jobs:
           owner: ${{ github.repository_owner }}
 
       - name: Expand team to individual reviewers
+        if: steps.owner.outputs.org == 'true'
         shell: bash
+        env:
+          org: ${{ github.repository_owner }}
+          repo: ${{ inputs.repository }}
+          team: ${{ inputs.requested_team }}
+          pr: ${{ inputs.pull_request_number }}
+          pr_author: ${{ github.event.pull_request.user.login }}
+          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token || secrets.robot-token || github.token }}
         run: |
-          org="${{ github.repository_owner }}"
-          repo="${{ inputs.repository }}"
-          team="${{ inputs.requested_team }}"
-          pr="${{ inputs.pull_request_number }}"
-          pr_author="${{ github.event.pull_request.user.login }}"
           # Get team members, but filter out a PR author because review cannot be requested from the author
           members=$(gh api /orgs/$org/teams/$team/members \
                         --paginate \
@@ -100,5 +133,3 @@ jobs:
                 -H "X-GitHub-Api-Version: 2022-11-28" \
                 /repos/$repo/pulls/$pr/requested_reviewers --input -
           fi
-        env:
-          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}

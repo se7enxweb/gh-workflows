@@ -1,112 +1,106 @@
-name: Ibexa Reusable / Cross Org PR
+name: Cross Org PR
+
+# Exponential Platform (se7enxweb) cross merge: after a push to a branch,
+# open a pull request that carries the branch into another repository
+# (for example a public package into a private edition).
+#
+# Where the destination is configured, first match wins:
+#   1. .github/cross-merge-map.json in the pushed repository (at the pushed commit)
+#   2. <map-repository>/<owner>/<repo> (a JSON file), default se7enxweb/cross-merge-map
+# Format: {"DEST": "owner/repo", "<source branch>": "<destination branch>", ...}
+#
+# Without a map there is nothing to do and the run succeeds. Pushing into
+# another repository needs a token that can write there (robot-token, a
+# personal access token); without one the cross merge is skipped with a
+# warning instead of failing.
 
 on:
   workflow_call:
+    inputs:
+      map-repository:
+        description: 'Repository holding the cross-merge maps'
+        required: false
+        type: string
+        default: 'se7enxweb/cross-merge-map'
     secrets:
       robot-token:
-        description: 'A PAT token used by the app/robot'
-        required: true
+        description: 'A token that can push to the destination repository'
+        required: false
+
+permissions:
+  contents: read
 
 jobs:
   job:
     runs-on: ubuntu-latest
 
     steps:
-        - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-          with:
-            fetch-depth: 0
-            token: ${{ secrets.robot-token }}
+      - name: Get merge map
+        id: map
+        env:
+          GH_TOKEN: ${{ secrets.robot-token || github.token }}
+          MAP_REPOSITORY: ${{ inputs.map-repository }}
+        run: |
+          map=""
+          if map=$(gh api -H 'Accept: application/vnd.github.raw' "/repos/${GITHUB_REPOSITORY}/contents/.github/cross-merge-map.json?ref=${GITHUB_SHA}" 2>/dev/null); then
+            echo "Using .github/cross-merge-map.json of ${GITHUB_REPOSITORY}"
+          elif map=$(gh api -H 'Accept: application/vnd.github.raw' "/repos/${MAP_REPOSITORY}/contents/${GITHUB_REPOSITORY}" 2>/dev/null); then
+            echo "Using ${MAP_REPOSITORY}/${GITHUB_REPOSITORY}"
+          else
+            echo "::notice::No cross-merge map for ${GITHUB_REPOSITORY}; nothing to merge."
+            exit 0
+          fi
+          printf '%s' "$map" | jq -c . > map.json
+          branch=$(jq -r --arg b "$GITHUB_REF_NAME" '.[$b] // empty' map.json)
+          repo=$(jq -r '.DEST // empty' map.json)
+          if [ -z "$branch" ]; then
+            echo "::notice::No cross-merge destination for branch ${GITHUB_REF_NAME}; nothing to merge."
+            exit 0
+          fi
+          if [ -z "$repo" ]; then
+            echo "::error::The cross-merge map for ${GITHUB_REPOSITORY} does not define DEST"
+            exit 1
+          fi
+          slug="${GITHUB_REF_NAME//\//-}"
+          {
+            echo "branch=${branch}"
+            echo "repo=${repo}"
+            echo "destination=temp_${slug}_to_${branch}"
+          } >> "$GITHUB_OUTPUT"
 
-        - name: Inject slug/short variables
-          uses: rlespinasse/github-slug-action@e6f261660910b273384c5c42b17a0217881b217a # v5.6.0
+      - name: Check for a token
+        id: token
+        if: steps.map.outputs.branch != ''
+        env:
+          HAS_TOKEN: ${{ secrets.robot-token != '' }}
+        run: |
+          if [ "$HAS_TOKEN" != "true" ]; then
+            echo "::warning::A cross merge to ${{ steps.map.outputs.repo }} is configured, but no robot-token secret is set; skipped."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
 
-        - name: Get merge map
-          id: map
-          # Allow failures to be ignored.
-          # We will consider output as empty
-          continue-on-error: true
-          shell: bash
-          run: |
-            map_repository="ibexa/cross-merge-map"
-            map_path="${{ github.repository }}"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        if: steps.token.outputs.ok == 'true'
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.robot-token }}
 
-            echo "Fetching cross-merge map for ${map_path}"
-            echo "Map repository: ${map_repository}"
-
-            gh api "/repos/${map_repository}" >/dev/null
-
-            if ! response=$(gh api "/repos/${map_repository}/contents/${map_path}" 2>&1); then
-              echo "No cross-merge map found for ${map_path}. Skipping cross-merge."
-              echo "${response}"
-              exit 0
-            fi
-
-            {
-              echo 'data<<EOF'
-              echo "$response"
-              echo EOF
-            } >> "$GITHUB_OUTPUT"
-          env:
-            GITHUB_TOKEN: ${{ secrets.robot-token }}
-
-        # Parse json and find destination branch and repository
-        - name: Set destination variables
-          id: destinations
-          if: ${{ steps.map.outputs.data }}
-          run: |
-            source_branch="${{ github.ref_name }}"
-
-            cat > input.json <<'EOF'
-            ${{ steps.map.outputs.data }}
-            EOF
-
-            jq -r '.["content"]' input.json | base64 --decode | jq -c . > map.json
-            echo "Looking for destination for branch ${source_branch}"
-            echo "Configured source branches: $(jq -r 'keys - ["DEST"] | join(", ")' map.json)"
-
-            branch=$(jq -r --arg source_branch "$source_branch" '.[$source_branch] // empty' map.json)
-            if [ -z "$branch" ]; then
-              echo "No cross-merge destination configured for branch ${source_branch}. Skipping cross-merge."
-              exit 0
-            fi
-
-            repo=$(jq -r '.DEST // empty' map.json)
-            if [ -z "$repo" ]; then
-              echo "::error::Cross-merge map for ${{ github.repository }} does not define DEST"
-              exit 1
-            fi
-
-            destination=temp_${{ env.GITHUB_REF_SLUG }}_to_$branch
-            echo "Destination branch found. It is ${branch}"
-            echo "Destination repository: ${repo}"
-            echo "branch=$branch" >> $GITHUB_OUTPUT
-            echo "repo=$repo" >> $GITHUB_OUTPUT
-            echo "destination=$destination" >> $GITHUB_OUTPUT
-
-        - name: Push updated code to temporary branch
-          if: ${{ steps.destinations.outputs.branch }}
-          env:
-            TOKEN: ${{ secrets.robot-token }}
-            REPO: ${{ steps.destinations.outputs.repo }}
-            DEST_BRANCH: ${{ steps.destinations.outputs.destination }}
-          run: |
-            git remote add cross https://x-access-token:${{ env.TOKEN }}@github.com/${{ env.REPO }}
-            # todo: implement generating *unique* temp branch
-            # todo: check if *previous* temp branch exists
-            git push cross HEAD:${{ env.DEST_BRANCH }} 2>&1
-
-        - name: Create Pull Request in Destination Repository
-          if: ${{ steps.destinations.outputs.branch }}
-          continue-on-error: true
-          env:
-            GITHUB_TOKEN: ${{ secrets.robot-token }}
-            REPO: ${{ steps.destinations.outputs.repo }}
-            DEST_BRANCH: ${{ steps.destinations.outputs.destination }}
-            SRC_BRANCH: ${{ steps.destinations.outputs.branch }}
-          run: |
-            # Remove "cross" remote that we just added
-            # If we don't, `gh pr` will break as it will try to read commits from all remotes
-            git remote rm cross
-            gh pr create --base ${{ env.SRC_BRANCH }} --head ${{ env.DEST_BRANCH }} \
-              --title "Merge branch '${{ env.GITHUB_REF_SLUG }}' of ${{ github.repository }} into ${{ env.SRC_BRANCH }}" --body "Cross merge PR" \
-              -R ${{ env.REPO }}
+      - name: Push to the destination and open a pull request
+        if: steps.token.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.robot-token }}
+          TOKEN: ${{ secrets.robot-token }}
+          REPO: ${{ steps.map.outputs.repo }}
+          DEST_BRANCH: ${{ steps.map.outputs.destination }}
+          BASE_BRANCH: ${{ steps.map.outputs.branch }}
+        run: |
+          git push "https://x-access-token:${TOKEN}@github.com/${REPO}" "HEAD:refs/heads/${DEST_BRANCH}"
+          if gh pr list -R "$REPO" --head "$DEST_BRANCH" --state open --json number --jq '.[0].number' | grep -q .; then
+            echo "A pull request for ${DEST_BRANCH} is already open in ${REPO}"
+            exit 0
+          fi
+          gh pr create -R "$REPO" --base "$BASE_BRANCH" --head "$DEST_BRANCH" \
+            --title "Merge branch '${GITHUB_REF_NAME}' of ${GITHUB_REPOSITORY} into ${BASE_BRANCH}" \
+            --body "Cross merge of ${GITHUB_REPOSITORY}@${GITHUB_SHA}"

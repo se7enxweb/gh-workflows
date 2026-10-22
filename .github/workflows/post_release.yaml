@@ -1,45 +1,99 @@
 name: Post release
 
+# Exponential Platform (se7enxweb) steps after a release was created for a tag:
+#
+#   1. Ask Packagist to refresh the package, so the new version is installable
+#      at once even where the repository has no Packagist webhook. Needs the
+#      PACKAGIST_USERNAME and PACKAGIST_TOKEN secrets; skipped without them.
+#   2. Optionally send a repository_dispatch event (type
+#      exponential-product-release) to an archive builder repository named by
+#      the archive-repository input. Needs ARCHIVE_DISPATCH_TOKEN, a token that
+#      can dispatch there; skipped without it or without the input.
+#
+# A "tag" that is not a tag of this repository (a run started from a branch)
+# ends the run successfully with nothing done.
+
 on:
   workflow_call:
     inputs:
       tag:
         required: true
         type: string
+      archive-repository:
+        description: 'owner/repo that builds release archives (optional)'
+        required: false
+        type: string
+        default: ''
+      php-version:
+        required: false
+        type: string
+        default: '8.3'
+    secrets:
+      PACKAGIST_USERNAME:
+        required: false
+      PACKAGIST_TOKEN:
+        required: false
+      ARCHIVE_DISPATCH_TOKEN:
+        required: false
+
+permissions:
+  contents: read
 
 jobs:
-  trigger-archive-maker:
+  post-release:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Authenticate as GitHub app
-        id: generate_token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ secrets.AUTOMATION_CLIENT_ID }}
-          private-key: ${{ secrets.AUTOMATION_CLIENT_SECRET }}
-          owner: ${{ github.repository_owner }}
-
-      - name: Extract tag name
+      - name: Check the tag
         id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
         run: |
-          TAG="${{ inputs.tag }}"
-          VERSION="${TAG#v}"
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          if [ -z "$TAG" ] || ! gh api "/repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::notice::'${TAG}' is not a tag of ${GITHUB_REPOSITORY}; nothing to do after a release."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Trigger archive-maker via repository_dispatch
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        with:
-          github-token: ${{ steps.generate_token.outputs.token }}
-          script: |
-            await github.rest.repos.createDispatchEvent({
-              owner: 'ibexa',
-              repo: 'archive-maker',
-              event_type: 'ibexa-product-release',
-              client_payload: {
-                product: '${{ github.event.repository.name }}',
-                version: '${{ steps.tag.outputs.version }}',
-                skeleton_version: '${{ steps.tag.outputs.version }}',
-                php_version: '8.3',
-              }
-            })
+      - name: Refresh the package on Packagist
+        if: steps.tag.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGIST_USERNAME: ${{ secrets.PACKAGIST_USERNAME }}
+          PACKAGIST_TOKEN: ${{ secrets.PACKAGIST_TOKEN }}
+        run: |
+          if [ -z "$PACKAGIST_USERNAME" ] || [ -z "$PACKAGIST_TOKEN" ]; then
+            echo "::notice::PACKAGIST_USERNAME / PACKAGIST_TOKEN are not set; Packagist refresh skipped (the repository webhook, if any, still applies)."
+            exit 0
+          fi
+          name=$(gh api -H 'Accept: application/vnd.github.raw' "/repos/${GITHUB_REPOSITORY}/contents/composer.json?ref=${{ inputs.tag }}" | jq -r '.name // empty')
+          if [ -z "$name" ]; then
+            echo "::notice::No composer.json name at ${{ inputs.tag }}; nothing to refresh."
+            exit 0
+          fi
+          curl -fsS -X POST -H 'Content-Type: application/json' \
+            "https://packagist.org/api/update-package?username=${PACKAGIST_USERNAME}&apiToken=${PACKAGIST_TOKEN}" \
+            -d "{\"repository\":{\"url\":\"https://github.com/${GITHUB_REPOSITORY}\"}}"
+          echo
+          echo "Packagist refresh requested for ${name}"
+
+      - name: Trigger the archive builder
+        if: steps.tag.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ARCHIVE_DISPATCH_TOKEN }}
+          ARCHIVE_REPOSITORY: ${{ inputs.archive-repository }}
+          PRODUCT: ${{ github.event.repository.name }}
+          VERSION: ${{ steps.tag.outputs.version }}
+          PHP_VERSION: ${{ inputs.php-version }}
+        run: |
+          if [ -z "$ARCHIVE_REPOSITORY" ] || [ -z "$GH_TOKEN" ]; then
+            echo "::notice::No archive-repository input or ARCHIVE_DISPATCH_TOKEN secret; archive build skipped."
+            exit 0
+          fi
+          jq -nc --arg p "$PRODUCT" --arg v "$VERSION" --arg php "$PHP_VERSION" \
+            '{event_type: "exponential-product-release", client_payload: {product: $p, version: $v, skeleton_version: $v, php_version: $php}}' |
+            gh api -X POST "/repos/${ARCHIVE_REPOSITORY}/dispatches" --input -
+          echo "Dispatched exponential-product-release ${PRODUCT} ${VERSION} to ${ARCHIVE_REPOSITORY}"

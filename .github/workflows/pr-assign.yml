@@ -6,94 +6,78 @@
 
 name: Assign Pull Request to maintainers
 
+# Exponential Platform (se7enxweb): assign a new pull request to the
+# maintainers of the files it changes.
+#
+# The maintainers list, first match wins:
+#   1. .github/maintainers.json of the base branch (never the PR's own copy)
+#   2. <map-repository>/<owner>/<repo>/maintainers, default se7enxweb/pr-assignees
+#   3. none: the repository owner is assigned when it is a user account
+# Format: {"params": [{"extension": "<regex on file names>", "assignee": "login1,login2"}, ...]}
+
 on:
   workflow_call:
+    inputs:
+      map-repository:
+        description: 'Repository holding the maintainers lists'
+        required: false
+        type: string
+        default: 'se7enxweb/pr-assignees'
     secrets:
       robot-token:
-        description: 'A PAT token used by the app/robot'
-        required: true
+        description: 'Unused, accepted for compatibility with older callers'
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
 
 jobs:
-  matrix:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-    steps:
-      - name: Get list of assignees
-        id: assignees
-        # Allow failures to be ignored.
-        # We will consider output as empty
-        continue-on-error: true
-        shell: bash
-        run: |
-          response=$(gh api /repos/ibexa/pr-assignees/contents/${{ github.repository }}/maintainers)
-          {
-            echo 'data<<EOF'
-            echo "$response"
-            echo EOF
-          } >> "$GITHUB_OUTPUT"
-        env:
-          GITHUB_TOKEN: ${{ secrets.robot-token }}
-
-      - name: Decode Base64 for output
-        id: set-matrix
-        # If previous step failed we assume that we got 404
-        # and thus there are no maintainers to be assigned
-        if: ${{ steps.assignees.outputs.data }}
-        run: |
-          cat > input.json <<'EOF'
-          ${{ steps.assignees.outputs.data }}
-          EOF
-          output=$(jq -r '.["content"]' input.json | base64 --decode | jq -c .)
-          echo "matrix=$output" >> $GITHUB_OUTPUT
-
   assign:
-    needs: matrix
     runs-on: ubuntu-latest
 
-    strategy:
-      fail-fast: false
-      matrix: ${{fromJson(needs.matrix.outputs.matrix)}}
-
     steps:
-      # NOTE: No checkout step — this workflow only uses the GitHub API
-      # to inspect PR metadata. Checking out untrusted PR code under
+      # NOTE: No checkout step: this workflow only uses the GitHub API to
+      # inspect PR metadata. Checking out untrusted PR code under
       # pull_request_target would be a "pwn request" vulnerability.
-
-      - name: Install tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pcregrep hub
-
-      - name: Check PR files against mask
-        id: changed-files
-        shell: bash {0} # Disable fail-fast when no match is found
-        run: |
-          matches=$(hub api --paginate /repos/${REPO}/pulls/${PR}/files | jq -r '.[].filename | split("/") | .[-1]' | pcregrep -c -- "$EXTENSION")
-          if [ "${matches}" -ge 1 ]; then
-            output=1
-          else
-            output=0
-          fi
-          echo "matches=$output" >> $GITHUB_OUTPUT
+      - name: Assign maintainers
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          PR: ${{ github.event.number }}
-          EXTENSION: ${{ matrix.params.extension }}
-
-      - name: Assign Pull Request maintainers
-        if: steps.changed-files.outputs.matches == 1
+          PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          OWNER: ${{ github.repository_owner }}
+          OWNER_TYPE: ${{ github.event.repository.owner.type }}
+          MAP_REPOSITORY: ${{ inputs.map-repository }}
         run: |
-          if [[ "x$CHANGED" == "x0" ]]; then
-            echo "There are no actual matches and we've just stumbled upon a GitHub Actions type casting bug"
+          if [ -z "$PR" ]; then
+            echo "::notice::Not a pull request event; nothing to assign."
             exit 0
           fi
-          assignees=$(echo -n "$ASSIGNEE" | jq -sRc '{assignees:split(",")}')
-          echo "$assignees" | hub api -X POST /repos/${REPO}/issues/${ISSUE_NUMBER}/assignees --input -
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          CHANGED: ${{ steps.changed-files.outputs.matches }}
-          ASSIGNEE: ${{ matrix.params.assignee }}
-          REPO: ${{ github.repository }}
-          ISSUE_NUMBER: ${{ github.event.number }}
+          if map=$(gh api -H 'Accept: application/vnd.github.raw' "/repos/${REPO}/contents/.github/maintainers.json?ref=${BASE_SHA}" 2>/dev/null); then
+            echo "Maintainers from .github/maintainers.json"
+          elif map=$(gh api -H 'Accept: application/vnd.github.raw' "/repos/${MAP_REPOSITORY}/contents/${REPO}/maintainers" 2>/dev/null); then
+            echo "Maintainers from ${MAP_REPOSITORY}"
+          elif [ "$OWNER_TYPE" = "User" ]; then
+            echo "No maintainers list; assigning the repository owner ${OWNER}"
+            map=$(jq -nc --arg o "$OWNER" '{params: [{extension: ".", assignee: $o}]}')
+          else
+            echo "::notice::No maintainers list for ${REPO}; nothing to assign."
+            exit 0
+          fi
+          files=$(gh api --paginate "/repos/${REPO}/pulls/${PR}/files" --jq '.[].filename | split("/") | .[-1]')
+          assignees=""
+          while IFS=$'\t' read -r extension assignee; do
+            [ -z "$extension" ] && continue
+            if printf '%s\n' "$files" | grep -qP -- "$extension"; then
+              assignees="${assignees:+$assignees,}${assignee}"
+            fi
+          done < <(printf '%s' "$map" | jq -r '.params[] | [.extension, .assignee] | @tsv')
+          if [ -z "$assignees" ]; then
+            echo "No maintainer matches the changed files."
+            exit 0
+          fi
+          echo "Assigning: ${assignees}"
+          jq -nc --arg a "$assignees" '{assignees: ($a | split(",") | unique)}' |
+            gh api -X POST "/repos/${REPO}/issues/${PR}/assignees" --input - >/dev/null

@@ -1,94 +1,77 @@
 name: Upmerge branch (callee)
 
+# Exponential Platform (se7enxweb): after a push to a maintenance branch,
+# merge it up into the next branch (for example 4.6 -> main).
+#
+# Which branch goes where, first match wins:
+#   1. .github/upmerge-map.json of the pushed repository (at the pushed commit)
+#   2. <map-repository>/<owner>/<repo> (a JSON file), default se7enxweb/upmerge-map
+# Format: {"<source branch>": "<destination branch>", ...}
+#
+# Without a map, or for a branch the map does not name, nothing is merged and
+# the run succeeds. The merge is pushed with robot-token when it is set (so the
+# push starts the destination's own workflows), otherwise with the workflow
+# token. A merge conflict fails the run: it has to be resolved by hand.
+
 on:
   workflow_call:
+    inputs:
+      map-repository:
+        required: false
+        type: string
+        default: 'se7enxweb/upmerge-map'
     secrets:
+      robot-token:
+        description: 'Optional token used to push the merge'
+        required: false
       AUTOMATION_CLIENT_ID:
-        description: 'GitHub App ID'
-        required: true
+        description: 'Unused, accepted for compatibility with older callers'
+        required: false
       AUTOMATION_CLIENT_SECRET:
-        description: 'GitHub App private key'
-        required: true
+        description: 'Unused, accepted for compatibility with older callers'
+        required: false
+
+permissions:
+  contents: write
 
 jobs:
   merge:
     runs-on: ubuntu-latest
     steps:
-      - name: Generate GitHub App Token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        id: generate_token
-        with:
-          client-id: ${{ secrets.AUTOMATION_CLIENT_ID }}
-          private-key: ${{ secrets.AUTOMATION_CLIENT_SECRET }}
-          owner: ${{ github.repository_owner }}
-
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 0
-          token: ${{ steps.generate_token.outputs.token }}
-
-      - name: Set environment
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com>"
-
-      - name: Inject slug/short variables
-        uses: rlespinasse/github-slug-action@e6f261660910b273384c5c42b17a0217881b217a # v5.6.0
-
       - name: Get merge map
         id: map
-        # Allow failures to be ignored.
-        # We will consider output as empty
-        continue-on-error: true
-        shell: bash
-        run: |
-          response=$(gh api /repos/ibexa/upmerge-map/contents/${{ github.repository }})
-          {
-            echo 'data<<EOF'
-            echo "$response"
-            echo EOF
-          } >> "$GITHUB_OUTPUT"
         env:
-          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
-
-      # Parse json and find destination branch and repository
-      - name: Set variables
-        id: destinations
-        if: ${{ steps.map.outputs.data }}
+          GH_TOKEN: ${{ github.token }}
+          MAP_REPOSITORY: ${{ inputs.map-repository }}
         run: |
-          cat > input.json <<'EOF'
-          ${{ steps.map.outputs.data }}
-          EOF
-          jq -r '.["content"]' input.json | base64 --decode | jq -c . > map.json
-          branch="${{ env.GITHUB_REF_SLUG }}"
-          echo "Looking for destination for branch ${branch}"
-          echo "Configured source branches: $(jq -r 'keys | join(", ")' map.json)"
-
-          destination=$(jq -r --arg branch "$branch" '.[$branch] // empty' map.json)
-          if [ -z "$destination" ]; then
-            echo "No upmerge destination configured for branch ${branch}. Skipping upmerge."
+          if map=$(gh api -H 'Accept: application/vnd.github.raw' "/repos/${GITHUB_REPOSITORY}/contents/.github/upmerge-map.json?ref=${GITHUB_SHA}" 2>/dev/null); then
+            echo "Using .github/upmerge-map.json"
+          elif map=$(gh api -H 'Accept: application/vnd.github.raw' "/repos/${MAP_REPOSITORY}/contents/${GITHUB_REPOSITORY}" 2>/dev/null); then
+            echo "Using ${MAP_REPOSITORY}/${GITHUB_REPOSITORY}"
+          else
+            echo "::notice::No upmerge map for ${GITHUB_REPOSITORY}; nothing to merge."
             exit 0
           fi
+          destination=$(printf '%s' "$map" | jq -r --arg b "$GITHUB_REF_NAME" '.[$b] // empty')
+          if [ -z "$destination" ]; then
+            echo "::notice::No upmerge destination for branch ${GITHUB_REF_NAME}; nothing to merge."
+            exit 0
+          fi
+          echo "destination=${destination}" >> "$GITHUB_OUTPUT"
 
-          echo "Destination branch found. It is ${destination} branch"
-          echo "SOURCE_BRANCH=$branch" >> $GITHUB_ENV
-          echo "DEST_BRANCH=$destination" >> $GITHUB_ENV
-          echo "destination=$destination" >> $GITHUB_OUTPUT
-
-      - name: Checkout code
-        if: ${{ steps.destinations.outputs.destination }}
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        if: steps.map.outputs.destination != ''
         with:
-          ref: ${{ env.DEST_BRANCH }}
+          ref: ${{ steps.map.outputs.destination }}
           fetch-depth: 0
-          token: ${{ steps.generate_token.outputs.token }}
+          token: ${{ secrets.robot-token || github.token }}
 
-      - name: Perform Upmerge of ${{ env.SOURCE_BRANCH }} to ${{ env.DEST_BRANCH }}
-        if: ${{ steps.destinations.outputs.destination }}
+      - name: Merge ${{ github.ref_name }} into ${{ steps.map.outputs.destination }}
+        if: steps.map.outputs.destination != ''
+        env:
+          DEST_BRANCH: ${{ steps.map.outputs.destination }}
         run: |
-          git merge -m "Merged branch '${{ env.SOURCE_BRANCH }}' into ${{ env.DEST_BRANCH }}" origin/$SOURCE_BRANCH
-
-      - name: Push changes
-        if: ${{ steps.destinations.outputs.destination }}
-        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git merge --no-edit -m "Merged branch '${GITHUB_REF_NAME}' into ${DEST_BRANCH}" "origin/${GITHUB_REF_NAME}"
           git push origin "HEAD:${DEST_BRANCH}"

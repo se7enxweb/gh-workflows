@@ -1,73 +1,138 @@
+name: Browser tests (Exponential Platform)
+
+# Exponential Platform (se7enxweb) browser tests.
+#
+# Builds a real Exponential Platform DXP project with the package under test
+# in it, installs it on SQLite with the clean demo data, builds the admin
+# assets, serves it with PHP's built-in server and drives it with Chromium
+# (Playwright): the front page must render, and the admin must accept the
+# administrator login.
+#
+#   - A package (core, admin-ui, fieldtype-richtext ...) is tested inside a
+#     project created from the skeleton (input `skeleton`, default
+#     se7enxweb/exponential-platform-dxp-skeleton); the checked out package
+#     replaces the released one through a Composer path repository.
+#   - A project or metapackage repository (a skeleton, exponential-platform-dxp,
+#     oss ...) is the thing installed: a skeleton is created from the checkout
+#     itself, a metapackage is swapped into the skeleton like a package.
+#
+# Everything comes from public sources (Packagist, GitHub); no secrets are
+# required. SLACK_WEBHOOK_URL, when set, receives the result of non-PR runs.
+#
+# The inputs of the Ibexa workflow (project-edition, test-suite, setup,
+# test-setup-phase-*, php-image, multirepository, job-count ...) are accepted
+# so that older callers keep working; they are recorded in the run summary.
+# The Ibexa Behat suites need the Ibexa CI images and services and are not
+# run here.
+
 on:
     workflow_call:
         inputs:
-            project-edition:
-                description: "Project edition to set up: oss, content, experience, commerce"
-                required: true
-                type: string
-            test-suite:
-                description: "Browser tests to run"
-                required: true
-                type: string
-            project-version:
-                description: "Project version to set up: ^3.3.x-dev, 4.1.x-dev, 4.2.x-dev, v3.3.0, v4.2.0. If not present will be inferred from package's branch-alias"
+            skeleton:
+                description: "Composer package of the project skeleton"
                 required: false
                 type: string
-            setup:
-                default: "doc/docker/base-dev.yml:doc/docker/selenium.yml"
-                description: "Docker Compose files to use"
-                required: false
-                type: string
-            test-setup-phase-1:
-                description: "Setup for browser tests - phase 1"
                 default: ""
+            skeleton-version:
+                description: "Version of the skeleton to create the project from"
                 required: false
                 type: string
-            test-setup-phase-2:
-                description: "Setup for browser tests - phase 2"
                 default: ""
+            remove-packages:
+                description: "Space separated packages to remove from the project before adding the tested one"
                 required: false
                 type: string
-            multirepository:
-                default: false
-                description: "Whether the job is running on a multirepository setup"
+                default: ""
+            php-version:
+                description: "PHP version"
+                required: false
+                type: string
+                default: "8.3"
+            node-version:
+                required: false
+                type: string
+                default: "22"
+            install-type:
+                description: "Installer type given to exponential:install"
+                required: false
+                type: string
+                default: "exponential-oss"
+            admin-paths:
+                description: "Comma separated admin URLs tried for the login form"
+                required: false
+                type: string
+                default: "/adminui/login,/admin/login,/login"
+            admin-user:
+                required: false
+                type: string
+                default: "admin"
+            admin-password:
+                required: false
+                type: string
+                default: "publish"
+            build-assets:
+                description: "Build the frontend and admin assets with yarn"
                 required: false
                 type: boolean
-            php-image:
-                default: "ghcr.io/ibexa/docker/php:8.3-node22"
-                description: "The PHP image to use"
-                required: false
-                type: string
-            ci-scripts-branch:
-                default: "main"
-                description: "The branch from ibexa/ci-scripts repository that should be used"
-                required: false
-                type: string
-            use-compatibility-layer:
-                default: false
-                type: boolean
-                required: false
-                description: "Use the compatibility layer when running tests"
-            job-count:
-                default: 1
-                required: false
-                type: number
-                description: "Number of jobs that will run the tests in parallel"
-            send-success-notification:
                 default: true
-                required: false
-                type: boolean
-                description: "Send a notification when the tests pass"
             timeout:
                 default: 60
                 description: "Job maximum timeout in minutes"
                 required: false
                 type: number
-            install-connector-quable:
-                default: false
+            # Accepted for compatibility with the Ibexa workflow
+            project-edition:
+                required: false
+                type: string
+                default: "oss"
+            test-suite:
+                required: false
+                type: string
+                default: ""
+            project-version:
+                required: false
+                type: string
+                default: ""
+            setup:
+                required: false
+                type: string
+                default: ""
+            test-setup-phase-1:
+                required: false
+                type: string
+                default: ""
+            test-setup-phase-2:
+                required: false
+                type: string
+                default: ""
+            multirepository:
                 required: false
                 type: boolean
-                description: "Install ibexa/connector-quable"                
+                default: false
+            php-image:
+                required: false
+                type: string
+                default: ""
+            ci-scripts-branch:
+                required: false
+                type: string
+                default: ""
+            use-compatibility-layer:
+                required: false
+                type: boolean
+                default: false
+            job-count:
+                required: false
+                type: number
+                default: 1
+            send-success-notification:
+                required: false
+                type: boolean
+                default: true
+            install-connector-quable:
+                required: false
+                type: boolean
+                default: false
         secrets:
             SLACK_WEBHOOK_URL:
                 required: false
@@ -94,282 +159,211 @@ on:
             LAMBDATEST_ACCESS_KEY:
                 required: false
 
+permissions:
+    contents: read
+
 env:
-    APP_ENV: behat
-    APP_DEBUG: 1
-    APP_SECRET: '2d4218d7b6c69a9f88da7b8986e64717b3c40948a7ba2b1ca309dc292472286d'
-    PHP_INI_ENV_memory_limit: 1G
-    COMPOSER_CACHE_DIR: ~/.composer/cache
+    APP_ENV: prod
+    APP_DEBUG: 0
+    COMPOSER_NO_INTERACTION: 1
+    COMPOSER_MEMORY_LIMIT: -1
 
 jobs:
-    setup-jobs:
-        runs-on: ubuntu-latest
-        timeout-minutes: 1
-        outputs:
-          matrix: ${{ steps.generate-matrix.outputs.matrix }}
-          job-count: ${{ steps.generate-matrix.outputs.job-count }}
-        steps:
-            - name: Set job count for builds
-              run: echo "job_count=${{ inputs.job-count }}" >> $GITHUB_ENV
-            - name: (v4) Limit job-count to max 3 for PRs
-              if: github.event_name == 'pull_request'
-              run: |
-                if [[ "$job_count" -gt 3 ]] ; then
-                  job_count=3
-                fi
-                echo "job_count=$job_count" >> $GITHUB_ENV
-              env:
-                job_count: ${{ env.job_count }}
-            - name: (v3) Limit job-count to 1 for PRs
-              if: github.event_name == 'pull_request' && inputs.project-version == '^3.3.x-dev'
-              run: echo "job_count=1" >> $GITHUB_ENV
-            - name: Generate matrix
-              id: generate-matrix
-              run: |
-                matrix=$(php -r 'echo json_encode(["offset" => range(0, ${{ env.job_count }} - 1)]);')
-                echo "matrix=$matrix" >> $GITHUB_OUTPUT
-                echo "job-count=$job_count" >> $GITHUB_OUTPUT
-            - if: always() && github.event_name != 'pull_request'
-              name: Create Slack message variables
-              run: |
-                echo "RESULT_EMOJI=❌" >> $GITHUB_ENV
-            - if: always() && github.event_name != 'pull_request'
-              name: Create Slack message
-              run: >
-                echo "SLACK_PAYLOAD=
-                {\"blocks\": [{\"type\": \"section\",\"text\": {\"type\": \"mrkdwn\",\"text\": \"
-                $RESULT_EMOJI *$GITHUB_REPOSITORY*:*$GITHUB_REF_NAME* ($GITHUB_ACTOR) |
-                <$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID|Details>
-                \"}}]}" >> $GITHUB_ENV
-            - if: always() && github.event_name != 'pull_request' && job.status != 'success' && job.status != 'skipped'
-              name: Send notification about workflow result
-              uses: slackapi/slack-github-action@45a88b9581bfab2566dc881e2cd66d334e621e2c # v3.0.3
-              with:
-                webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
-                webhook-type: incoming-webhook
-                payload: ${{ env.SLACK_PAYLOAD }}
-
     browser-tests:
-        needs: setup-jobs
         runs-on: ubuntu-latest
         timeout-minutes: ${{ inputs.timeout }}
-        strategy:
-          fail-fast: false
-          matrix: ${{ fromJson(needs.setup-jobs.outputs.matrix) }}
         steps:
-            - if: contains(inputs.setup, 'varnish')
-              name: "[Varnish] Set the URL the tests should access"
-              run: echo "WEB_HOST=http://varnish" >> $GITHUB_ENV
+            - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+              with:
+                  path: package
 
             - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+              with:
+                  repository: se7enxweb/gh-workflows
+                  ref: main
+                  path: .gh-workflows
+                  sparse-checkout: actions/exponential-browser-tests
 
-            - name: Set up project version
-              id: project-version
-              run: |
-                if [[ "$version" == "" ]] ; then
-                    echo "Input project version not set, taking the value from composer.json"
-                    version=$(cat composer.json | jq -r '.extra | ."branch-alias" | .[]')
-                fi
-                if [[ "$version" == "3.3.x-dev" ]] ; then
-                    version="^3.3.x-dev"
-                fi
-                echo "version=$version" >> $GITHUB_OUTPUT
+            - name: Record the requested setup
               env:
-                version: ${{ inputs.project-version }}
+                  EDITION: ${{ inputs.project-edition }}
+                  SUITE: ${{ inputs.test-suite }}
+                  SETUP: ${{ inputs.setup }}
+              run: |
+                  {
+                    echo "### Browser tests"
+                    echo
+                    echo "- Edition requested by the caller: \`${EDITION}\`"
+                    [ -n "$SUITE" ] && echo "- Ibexa Behat suite named by the caller (not run here): \`${SUITE}\`"
+                    [ -n "$SETUP" ] && echo "- Ibexa docker setup named by the caller (not used here): \`${SETUP}\`"
+                  } >> "$GITHUB_STEP_SUMMARY"
 
-            - name: Setup PHP Action
+            - name: Work out what to install
+              id: plan
+              env:
+                  SKELETON: ${{ inputs.skeleton }}
+                  SKELETON_VERSION: ${{ inputs.skeleton-version }}
+                  PROJECT_VERSION: ${{ inputs.project-version }}
+              run: |
+                  name=$(jq -r '.name' package/composer.json)
+                  type=$(jq -r '.type // "library"' package/composer.json)
+                  branch=$(jq -r '(.extra["branch-alias"] // {}) | keys[0] // empty' package/composer.json)
+                  alias=$(jq -r '(.extra["branch-alias"] // {}) | to_entries[0].value // empty' package/composer.json)
+                  [ -z "$branch" ] && branch="dev-${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
+                  if [ -n "$PROJECT_VERSION" ]; then
+                      # A released version was asked for: install exactly that.
+                      mode=release
+                  elif [ "$type" = "project" ]; then
+                      mode=self
+                  else
+                      mode=package
+                  fi
+                  if [ -z "$SKELETON" ]; then
+                      case "$alias" in
+                          4.*) SKELETON=se7enxweb/exponential-platform-v4x-dxp-skeleton ;;
+                          *)   SKELETON=se7enxweb/exponential-platform-dxp-skeleton ;;
+                      esac
+                  fi
+                  [ -z "$SKELETON_VERSION" ] && SKELETON_VERSION="dev-master"
+                  [ "$mode" = self ] && SKELETON="$name" && SKELETON_VERSION="$branch"
+                  [ "$mode" = release ] && SKELETON="$name" && SKELETON_VERSION="$PROJECT_VERSION"
+                  {
+                      echo "name=$name"; echo "type=$type"; echo "branch=$branch"; echo "alias=$alias"
+                      echo "mode=$mode"; echo "skeleton=$SKELETON"; echo "skeleton-version=$SKELETON_VERSION"
+                  } | tee -a "$GITHUB_OUTPUT"
+                  echo "- Installed: \`${SKELETON}:${SKELETON_VERSION}\` with \`${name}\` (${branch}, ${alias:-no alias}) as *${mode}*" >> "$GITHUB_STEP_SUMMARY"
+
+            - name: Setup PHP
               uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
               with:
-                  # 6.0 requires PHP 8.5, lower versions don't support it
-                  php-version: ${{ startsWith(steps.project-version.outputs.version, '6.0') && '8.5' || '8.3' }}
+                  php-version: ${{ inputs.php-version }}
                   coverage: none
+                  extensions: gd, intl, xsl, pdo_sqlite, sqlite3, curl, mbstring, zip, sodium
+                  ini-values: memory_limit=-1
                   tools: composer:v2
 
-            - name: Check Composer version
-              run: composer --version
-
-            - name: Cache dependencies
-              uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+            - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
               with:
-                  path: ${{ env.COMPOSER_CACHE_DIR }}
-                  key: ${{ inputs.project-edition }}-${{ steps.project-version.outputs.version }}-${{ inputs.php-image }}-${{ github.sha }}
-                  restore-keys: |
-                    ${{ inputs.project-edition }}-${{ steps.project-version.outputs.version }}-${{ inputs.php-image }}
+                  node-version: ${{ inputs.node-version }}
 
-            - name: Generate token
-              id: generate_token
-              uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+            - name: Composer authentication
+              run: composer config -g github-oauth.github.com "${{ github.token }}"
+
+            - name: Create the project
+              env:
+                  NAME: ${{ steps.plan.outputs.name }}
+                  MODE: ${{ steps.plan.outputs.mode }}
+                  BRANCH: ${{ steps.plan.outputs.branch }}
+                  SKELETON: ${{ steps.plan.outputs.skeleton }}
+                  SKELETON_VERSION: ${{ steps.plan.outputs.skeleton-version }}
+                  REMOVE: ${{ inputs.remove-packages }}
+              run: |
+                  repo=$(jq -nc --arg url "$GITHUB_WORKSPACE/package" --arg n "$NAME" --arg v "$BRANCH" \
+                         '{type: "path", url: $url, options: {symlink: false, versions: {($n): $v}}}')
+                  if [ "$MODE" = self ]; then
+                      composer create-project "$SKELETON" project "$SKELETON_VERSION" --repository="$repo" --no-install --no-scripts
+                  else
+                      composer create-project "$SKELETON" project "$SKELETON_VERSION" --no-install --no-scripts
+                  fi
+                  cd project
+                  composer config allow-plugins true
+                  if [ "$MODE" = package ]; then
+                      composer config repositories.tested "$repo"
+                      for p in $REMOVE; do composer remove "$p" --no-update; done
+                      composer require "${NAME}:${BRANCH}" --no-update
+                  fi
+                  cat composer.json
+
+            - name: Configure the environment
+              working-directory: project
+              run: |
+                  {
+                      echo "APP_ENV=prod"
+                      echo "APP_DEBUG=0"
+                      echo "APP_SECRET=$(openssl rand -hex 32)"
+                      echo 'DATABASE_URL="sqlite:///%kernel.project_dir%/var/data_%kernel.environment%.db"'
+                      echo "MESSENGER_TRANSPORT_DSN=sync://"
+                      echo "SEARCH_ENGINE=legacy"
+                  } > .env.local
+
+            - name: Composer install
+              working-directory: project
+              run: |
+                  composer install --no-progress
+                  composer show "${{ steps.plan.outputs.name }}"
+                  [ -f .env ] && cat .env.local >> .env || cp .env.local .env
+
+            - name: Install the database
+              working-directory: project
+              run: |
+                  if php bin/console list exponential 2>/dev/null | grep -q 'exponential:install'; then
+                      php bin/console exponential:install --no-interaction "${{ inputs.install-type }}"
+                  else
+                      php bin/console ibexa:install --no-interaction
+                  fi
+
+            - name: Build assets
+              if: inputs.build-assets
+              working-directory: project
+              run: |
+                  php bin/console assets:install --symlink --relative public
+                  if [ -f package.json ]; then
+                      corepack enable || true
+                      yarn install --non-interactive --network-timeout 600000
+                      if jq -e '.scripts["ibexa:build"]' package.json >/dev/null; then yarn ibexa:build; fi
+                      if jq -e '.scripts.build' package.json >/dev/null; then yarn build; fi
+                  fi
+
+            - name: Warm up and start the web server
+              working-directory: project
+              run: |
+                  php bin/console cache:clear
+                  nohup php -S 127.0.0.1:8000 -t public "$GITHUB_WORKSPACE/.gh-workflows/actions/exponential-browser-tests/router.php" > var/php-server.log 2>&1 &
+                  for i in $(seq 1 60); do
+                      curl -s -o /dev/null http://127.0.0.1:8000/ && break
+                      sleep 2
+                  done
+                  curl -s -o /dev/null -w 'Front page: HTTP %{http_code}\n' http://127.0.0.1:8000/
+
+            - name: Install Chromium
+              working-directory: .gh-workflows/actions/exponential-browser-tests
+              run: |
+                  npm init -y >/dev/null
+                  npm install --no-audit --no-fund playwright@1.48.2
+                  npx playwright install --with-deps chromium
+
+            - name: Run browser tests
+              working-directory: .gh-workflows/actions/exponential-browser-tests
+              run: |
+                  node smoke.mjs http://127.0.0.1:8000 "${{ inputs.admin-paths }}" "${{ inputs.admin-user }}" "${{ inputs.admin-password }}" "$GITHUB_WORKSPACE/screenshots"
+
+            - name: Logs on failure
+              if: failure()
+              working-directory: project
+              run: |
+                  tail -n 100 var/php-server.log 2>/dev/null || true
+                  tail -n 200 var/log/*.log 2>/dev/null || true
+
+            - name: Upload screenshots and logs
+              if: always()
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
               with:
-                  client-id: ${{ secrets.AUTOMATION_CLIENT_ID }}
-                  private-key: ${{ secrets.AUTOMATION_CLIENT_SECRET }}
-                  owner: ${{ !contains(steps.project-version.outputs.version, '3.3') && 'ibexa' || 'ezsystems' }}
+                  name: browser-tests-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: |
+                      screenshots
+                      project/var/log
+                      project/var/php-server.log
+                  if-no-files-found: ignore
 
-            - if: env.SATIS_NETWORK_KEY != ''
-              name: Add composer keys for private packagist
-              run: |
-                  composer config http-basic.updates.ibexa.co $SATIS_NETWORK_KEY $SATIS_NETWORK_TOKEN
+            - name: Notify Slack
+              if: always() && github.event_name != 'pull_request' && (job.status != 'success' || inputs.send-success-notification)
               env:
-                  SATIS_NETWORK_KEY: ${{ secrets.SATIS_NETWORK_KEY }}
-                  SATIS_NETWORK_TOKEN: ${{ secrets.SATIS_NETWORK_TOKEN }}
-
-            - name: Add composer key for GitHub App
-              if: ${{ steps.generate_token.outputs.token != '' }}
+                  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+                  STATUS: ${{ job.status }}
               run: |
-                  composer config github-oauth.github.com $GITHUB_TOKEN
-              env:
-                  GITHUB_TOKEN: ${{ !contains(steps.project-version.outputs.version, '3.3') && steps.generate_token.outputs.token || secrets.EZROBOT_33 }}
-
-            - if: startsWith(steps.project-version.outputs.version, 'v') == false
-              name: Set up whole project using the tested dependency (dev version)
-              run: |
-                curl -L "https://raw.githubusercontent.com/ibexa/ci-scripts/${{ inputs.ci-scripts-branch }}/bin/${{ steps.project-version.outputs.version }}/prepare_project_edition.sh" > prepare_project_edition.sh
-                chmod +x prepare_project_edition.sh
-                ./prepare_project_edition.sh ${{ inputs.project-edition }} ${{ steps.project-version.outputs.version }} ${{ inputs.setup }} ${{ inputs.php-image }}
-              env:
-                PERCY_TOKEN: ${{ secrets.PERCY_TOKEN }}
-                CLOUDINARY_URL: "${{ secrets.CLOUDINARY_URL }}"
-                LAMBDATEST_PROJECT_TOKEN: ${{ secrets.LAMBDATEST_PROJECT_TOKEN }}
-                LAMBDATEST_USERNAME: "${{ secrets.LAMBDATEST_USERNAME }}"
-                LAMBDATEST_ACCESS_KEY: "${{ secrets.LAMBDATEST_ACCESS_KEY }}"
-                INSTALL_CONNECTOR_QUABLE: ${{ inputs.install-connector-quable }}
-                CI_SCRIPTS_REF: ${{ inputs.ci-scripts-branch }}
-
-            - if: startsWith(steps.project-version.outputs.version, 'v')
-              name: Set up whole project using a stable release
-              run: |
-                curl -L "https://raw.githubusercontent.com/ibexa/ci-scripts/${{ inputs.ci-scripts-branch }}/bin/stable/prepare_project_edition.sh" > prepare_project_edition.sh
-                chmod +x prepare_project_edition.sh
-                ./prepare_project_edition.sh ${{ inputs.project-edition }} ${{ steps.project-version.outputs.version }} ${{ inputs.setup }} ${{ inputs.php-image }}
-              env:
-                PERCY_TOKEN: ${{ secrets.PERCY_TOKEN }}
-                CLOUDINARY_URL: "${{ secrets.CLOUDINARY_URL }}"
-                LAMBDATEST_PROJECT_TOKEN: ${{ secrets.LAMBDATEST_PROJECT_TOKEN }}
-                LAMBDATEST_USERNAME: "${{ secrets.LAMBDATEST_USERNAME }}"
-                LAMBDATEST_ACCESS_KEY: "${{ secrets.LAMBDATEST_ACCESS_KEY }}"
-                INSTALL_CONNECTOR_QUABLE: ${{ inputs.install-connector-quable }}
-                CI_SCRIPTS_REF: ${{ inputs.ci-scripts-branch }}
-
-            - if: inputs.use-compatibility-layer
-              name: Set up compatibility-layer
-              run: |
-                cd ${HOME}/build/project
-                docker compose --env-file=.env exec -T app sh -c "composer require ibexa/compatibility-layer:${{ steps.project-version.outputs.version }} --no-scripts --no-plugins"
-                docker compose --env-file=.env exec -T app sh -c "composer recipes:install ibexa/compatibility-layer --force"
-                docker compose --env-file=.env exec -T --user www-data app sh -c "composer run post-install-cmd"
-
-            - if: inputs.multirepository && contains(inputs.setup, 'solr8.yml')
-              name: Set up multirepository build with Solr
-              run: |
-                cd ${HOME}/build/project
-                # Drop database used by default connection
-                docker compose exec -T --user www-data app sh -c "php bin/console doctrine:database:drop --connection=default --force"
-                # Clear SPI cache
-                docker compose exec -T --user www-data app sh -c 'php bin/console cache:pool:clear ${CACHE_POOL:-cache.tagaware.filesystem}'
-                # Run setup
-                docker compose exec -T --user www-data app sh -c "vendor/bin/ibexabehat --mode=standard --profile=setup --suite=multirepository -c=\$([ -f behat_ibexa_oss.php ] && echo behat_ibexa_oss.php || echo behat_ibexa_oss.yaml) --tags=~@elastic"
-                if [[ "${{ steps.project-version.outputs.version }}" == *'5.0.x-dev'* ]]; then
-                  docker compose exec -T --user www-data app sh -c "NODE_OPTIONS='--max-old-space-size=3072' composer run post-install-cmd"
-                else
-                  docker compose exec -T --user www-data app sh -c "composer run post-install-cmd"
-                fi
-                # Reinstall database using the new repository
-                docker compose exec -T --user www-data app sh -c "php bin/console ibexa:install --no-interaction"
-
-            - if: inputs.multirepository && contains(inputs.setup, 'elastic')
-              name: Set up multirepository build with Elastic
-              run: |
-                cd ${HOME}/build/project
-                # Drop database used by default connection
-                docker compose exec -T --user www-data app sh -c "php bin/console doctrine:database:drop --connection=default --force"
-                # Clear SPI cache
-                docker compose exec -T --user www-data app sh -c 'php bin/console cache:pool:clear ${CACHE_POOL:-cache.tagaware.filesystem}'
-                # Run setup
-                docker compose exec -T --user www-data app sh -c "vendor/bin/ibexabehat --mode=standard --profile=setup --suite=multirepository -c=\$([ -f behat_ibexa_oss.php ] && echo behat_ibexa_oss.php || echo behat_ibexa_oss.yaml) --tags=~@solr"
-                if [[ "${{ steps.project-version.outputs.version }}" == *'5.0.x-dev'* ]]; then
-                  docker compose exec -T --user www-data app sh -c "NODE_OPTIONS='--max-old-space-size=3072' composer run post-install-cmd"
-                else
-                  docker compose exec -T --user www-data app sh -c "composer run post-install-cmd"
-                fi
-                # Reinstall database using the new repository
-                docker compose exec -T --user www-data app sh -c "php bin/console ibexa:install --no-interaction"
-
-            - if: inputs.multirepository && !contains(inputs.setup, 'elastic') && !contains(inputs.setup, 'solr8.yml')
-              name: Set up multirepository build with LSE
-              run: |
-                cd ${HOME}/build/project
-                # Drop database used by default connection
-                docker compose exec -T --user www-data app sh -c "php bin/console doctrine:database:drop --connection=default --force"
-                # Clear SPI cache
-                docker compose exec -T --user www-data app sh -c 'php bin/console cache:pool:clear ${CACHE_POOL:-cache.tagaware.filesystem}'
-                # Run setup
-                docker compose exec -T --user www-data app sh -c "vendor/bin/ibexabehat --mode=standard --profile=setup --suite=multirepository -c=\$([ -f behat_ibexa_oss.php ] && echo behat_ibexa_oss.php || echo behat_ibexa_oss.yaml) --tags=@multirepository"
-                if [[ "${{ steps.project-version.outputs.version }}" == *'5.0.x-dev'* ]]; then
-                  docker compose exec -T --user www-data app sh -c "NODE_OPTIONS='--max-old-space-size=3072' composer run post-install-cmd"
-                else
-                  docker compose exec -T --user www-data app sh -c "composer run post-install-cmd"
-                fi
-                # Reinstall database using the new repository
-                docker compose exec -T --user www-data app sh -c "php bin/console ibexa:install --no-interaction"
-
-            - name: Add ibexa_integrated_help config
-              if: inputs.project-edition != 'oss' && !contains(steps.project-version.outputs.version, '3.3')
-              run: |
-                cd ${HOME}/build/project
-                docker compose --env-file=.env exec -T --user www-data app sh -c "printf 'ibexa_integrated_help:\n    enabled: false\n' > config/packages/ibexa_integrated_help.yaml"
-
-            - if: inputs.test-setup-phase-1 != ''
-              name: Run first phase of tests setup
-              run: |
-                cd ${HOME}/build/project
-                docker compose --env-file=.env exec -T --user www-data app sh -c "vendor/bin/ibexabehat ${{ inputs.test-setup-phase-1 }}"
-                if [[ "${{ steps.project-version.outputs.version }}" == *'5.0.x-dev'* ]]; then
-                  docker compose --env-file=.env exec -T --user www-data app sh -c "NODE_OPTIONS='--max-old-space-size=3072' composer run post-install-cmd"
-                else
-                  docker compose --env-file=.env exec -T --user www-data app sh -c "composer run post-install-cmd"
-                fi
-
-            - if: inputs.test-setup-phase-2 != ''
-              name: Run second phase of tests setup
-              run: |
-                cd ${HOME}/build/project
-                docker compose --env-file=.env exec -T --user www-data app sh -c "vendor/bin/ibexabehat ${{ inputs.test-setup-phase-2 }}"
-                if [[ "${{ steps.project-version.outputs.version }}" == *'5.0.x-dev'* ]]; then
-                  docker compose --env-file=.env exec -T --user www-data app sh -c "NODE_OPTIONS='--max-old-space-size=3072' composer run post-install-cmd"
-                else
-                  docker compose --env-file=.env exec -T --user www-data app sh -c "composer run post-install-cmd"
-                fi
-
-            - name: Run tests
-              run: |
-                  cd ${HOME}/build/project
-                  docker compose --env-file=.env exec -T --user www-data app sh -c "vendor/bin/ibexabehat --group-count=${{ needs.setup-jobs.outputs.job-count }} --group-offset=${{ matrix.offset }} ${{ inputs.test-suite }} --process=1"
-
-            - if: always() && github.event_name != 'pull_request'
-              name: Create Slack message variables
-              run: |
-                echo "RESULT_EMOJI=:x:" >> $GITHUB_ENV
-                JOB_NUMBER=$(expr ${{ matrix.offset }} + 1)
-                echo "JOB_NUMBER=$JOB_NUMBER" >> $GITHUB_ENV
-
-            - if: always() && job.status == 'success' && github.event_name != 'pull_request'
-              name: Create Slack message success variables
-              run: |
-                echo "RESULT_EMOJI=:white_check_mark:" >> $GITHUB_ENV
-
-            - if: always() && github.event_name != 'pull_request'
-              name: Create Slack message
-              run: >
-                 echo "SLACK_PAYLOAD=
-                 {\"blocks\": [{\"type\": \"section\",\"text\": {\"type\": \"mrkdwn\",\"text\": \"
-                 $RESULT_EMOJI *$GITHUB_REPOSITORY*:*$GITHUB_REF_NAME* ($GITHUB_ACTOR) |
-                 <$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID|Details> |
-                 $JOB_NUMBER/${{ inputs.job-count }}
-                 \"}}]}" >> $GITHUB_ENV
-
-            - if: always() && github.event_name != 'pull_request' && (job.status != 'success' || inputs.send-success-notification)
-              name: Send notification about workflow result
-              uses: slackapi/slack-github-action@45a88b9581bfab2566dc881e2cd66d334e621e2c # v3.0.3
-              with:
-                  webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
-                  webhook-type: incoming-webhook
-                  payload: ${{ env.SLACK_PAYLOAD }}
+                  if [ -z "$SLACK_WEBHOOK_URL" ]; then
+                      echo "SLACK_WEBHOOK_URL is not set; no notification sent."
+                      exit 0
+                  fi
+                  text="${STATUS}: *${GITHUB_REPOSITORY}*:*${GITHUB_REF_NAME}* (${GITHUB_ACTOR}) | <${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}|Details>"
+                  jq -nc --arg t "$text" '{text: $t}' | curl -fsS -X POST -H 'Content-Type: application/json' --data @- "$SLACK_WEBHOOK_URL" || true
