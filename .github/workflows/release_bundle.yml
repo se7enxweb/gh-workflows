@@ -98,7 +98,7 @@ jobs:
           echo "exists=false" >> "$GITHUB_OUTPUT"
 
       - name: Build release notes
-        if: steps.tag.outputs.tag != '' && steps.existing.outputs.exists != 'true'
+        if: steps.tag.outputs.tag != '' && (steps.existing.outputs.exists != 'true' || inputs.dry-run)
         env:
           TAG: ${{ steps.tag.outputs.tag }}
           LOCK_PACKAGES: ${{ inputs.lock-packages }}
