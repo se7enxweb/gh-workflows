@@ -292,7 +292,7 @@ jobs:
               working-directory: project
               run: |
                   composer install --no-progress
-                  composer show "${{ steps.plan.outputs.name }}"
+                  if [ "${{ steps.plan.outputs.kind }}" = package ]; then composer show "${{ steps.plan.outputs.name }}"; else composer show --self | head -n 12; fi
                   [ -f .env ] && cat .env.local >> .env || cp .env.local .env
 
             - name: Install the database
