@@ -194,8 +194,8 @@ jobs:
                     echo "### Browser tests"
                     echo
                     echo "- Edition requested by the caller: \`${EDITION}\`"
-                    [ -n "$SUITE" ] && echo "- Ibexa Behat suite named by the caller (not run here): \`${SUITE}\`"
-                    [ -n "$SETUP" ] && echo "- Ibexa docker setup named by the caller (not used here): \`${SETUP}\`"
+                    if [ -n "$SUITE" ]; then echo "- Ibexa Behat suite named by the caller (not run here): \`${SUITE}\`"; fi
+                    if [ -n "$SETUP" ]; then echo "- Ibexa docker setup named by the caller (not used here): \`${SETUP}\`"; fi
                   } >> "$GITHUB_STEP_SUMMARY"
 
             - name: Work out what to install
@@ -341,10 +341,11 @@ jobs:
 
             - name: Logs on failure
               if: failure()
-              working-directory: project
               run: |
-                  tail -n 100 var/php-server.log 2>/dev/null || true
-                  tail -n 200 var/log/*.log 2>/dev/null || true
+                  if [ -d project ]; then
+                      tail -n 100 project/var/php-server.log 2>/dev/null || true
+                      tail -n 200 project/var/log/*.log 2>/dev/null || true
+                  fi
 
             - name: Upload screenshots and logs
               if: always()
