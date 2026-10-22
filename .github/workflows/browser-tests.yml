@@ -343,7 +343,12 @@ jobs:
                       # Development versions of the tested package and its siblings must resolve.
                       composer config minimum-stability dev
                       composer config prefer-stable true
-                      # Recipes run only when the root requires symfony/flex.
+                      # Recipes run only when the root requires symfony/flex, and bin/console
+                      # needs symfony/runtime; a skeleton that got both through the replaced
+                      # metapackage (ibexa/oss-skeleton) loses them with it.
+                      if ! jq -e '.require["symfony/runtime"]' composer.json >/dev/null; then
+                          composer require "symfony/runtime:*" --no-update
+                      fi
                       if ! jq -e '.require["symfony/flex"]' composer.json >/dev/null; then
                           composer require "symfony/flex:^2" --no-update
                       fi
