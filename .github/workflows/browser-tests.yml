@@ -302,6 +302,9 @@ jobs:
                   cd project
                   composer config allow-plugins true
                   if [ "$KIND" = package ]; then
+                      # Development versions of the tested package and its siblings must resolve.
+                      composer config minimum-stability dev
+                      composer config prefer-stable true
                       [ "$SOURCE" = checkout ] && composer config repositories.tested "$repo"
                       for p in $REMOVE; do composer remove "$p" --no-update; done
                       composer require "${NAME}:${VERSION}" --no-update
