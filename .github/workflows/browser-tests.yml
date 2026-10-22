@@ -313,7 +313,11 @@ jobs:
                       corepack enable || true
                       yarn install --non-interactive --network-timeout 600000
                       if jq -e '.scripts["ibexa:build"]' package.json >/dev/null; then yarn ibexa:build; fi
-                      if jq -e '.scripts.build' package.json >/dev/null; then yarn build; fi
+                      # The site (app) build is reported but not fatal: the admin login test
+                      # needs only the admin assets built above.
+                      if jq -e ".scripts.build" package.json >/dev/null && ! yarn build; then
+                          echo "::warning::yarn build (site assets) failed in this project; see the log above."
+                      fi
                   fi
 
             - name: Warm up and start the web server
