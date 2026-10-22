@@ -52,6 +52,11 @@ on:
                 required: false
                 type: string
                 default: "22"
+            node-resolutions:
+                description: "JSON of yarn resolutions applied when the project has no yarn.lock"
+                required: false
+                type: string
+                default: '{"webpack": "5.106.2"}'
             install-type:
                 description: "Installer type given to exponential:install"
                 required: false
@@ -307,10 +312,20 @@ jobs:
             - name: Build assets
               if: inputs.build-assets
               working-directory: project
+              env:
+                  NODE_RESOLUTIONS: ${{ inputs.node-resolutions }}
               run: |
                   php bin/console assets:install --symlink --relative public
                   if [ -f package.json ]; then
                       corepack enable || true
+                      if [ ! -f yarn.lock ] && [ -n "$NODE_RESOLUTIONS" ]; then
+                          # No lock file: pin what the input names (by default the webpack the
+                          # Exponential Platform starter locks; newer webpack 5 releases moved the
+                          # internals Encore 5's copyFiles loader needs).
+                          echo "No yarn.lock; resolutions: ${NODE_RESOLUTIONS}"
+                          jq --argjson r "$NODE_RESOLUTIONS" '.resolutions = ((.resolutions // {}) + $r)' package.json > package.json.new
+                          mv -f package.json.new package.json
+                      fi
                       yarn install --non-interactive --network-timeout 600000
                       if jq -e '.scripts["ibexa:build"]' package.json >/dev/null; then yarn ibexa:build; fi
                       # The site (app) build is reported but not fatal: the admin login test

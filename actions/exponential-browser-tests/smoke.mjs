@@ -47,12 +47,24 @@ for (const [i, path] of adminPaths.entries()) {
         console.log(`  no login form at ${path}`);
         continue;
     }
-    await userField.fill(user);
-    await page.locator('input[name="_password"], input#password').first().fill(password);
-    await Promise.all([
-        page.waitForLoadState('load'),
-        page.locator('form button[type="submit"], form input[type="submit"]').first().click(),
-    ]);
+    // Type like a person: the admin login enables its button from key events.
+    const passwordField = page.locator('input[name="_password"], input#password').first();
+    await userField.click();
+    await userField.pressSequentially(user, { delay: 20 });
+    await passwordField.click();
+    await passwordField.pressSequentially(password, { delay: 20 });
+    const button = page.locator('form button[type="submit"], form input[type="submit"]').first();
+    try {
+        await button.waitFor({ state: 'visible', timeout: 5000 });
+        await page.waitForFunction((el) => !el.disabled, await button.elementHandle(), { timeout: 10000 });
+        await Promise.all([page.waitForNavigation({ timeout: 60000 }), button.click()]);
+    } catch (e) {
+        console.log(`  login button not usable (${String(e).split('\n')[0]}); submitting the form directly`);
+        await Promise.all([
+            page.waitForNavigation({ timeout: 60000 }),
+            passwordField.evaluate((el) => el.form.submit()),
+        ]);
+    }
     await page.waitForTimeout(3000);
     await page.screenshot({ path: `${out}/03-after-login.png`, fullPage: true });
     const url = page.url();
