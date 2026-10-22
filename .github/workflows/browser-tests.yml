@@ -211,8 +211,16 @@ jobs:
                   SKELETON: ${{ inputs.skeleton }}
                   SKELETON_VERSION: ${{ inputs.skeleton-version }}
                   PROJECT_VERSION: ${{ inputs.project-version }}
+                  GH_TOKEN: ${{ github.token }}
               run: |
                   name=$(jq -r '.name' package/composer.json)
+                  # Packagist knows the repository under the name on its default branch;
+                  # a maintenance branch may still carry an older name (core 4.6: ibexa/core).
+                  canonical=$(gh api -H 'Accept: application/vnd.github.raw' "/repos/${GITHUB_REPOSITORY}/contents/composer.json" 2>/dev/null | jq -r '.name // empty' 2>/dev/null || true)
+                  if [ -n "$canonical" ] && [ "$canonical" != "$name" ]; then
+                      echo "::notice::${name} is published as ${canonical}; testing it under that name."
+                      name="$canonical"
+                  fi
                   type=$(jq -r '.type // "library"' package/composer.json)
                   branch=$(jq -r '(.extra["branch-alias"] // {}) | keys[0] // empty' package/composer.json)
                   alias=$(jq -r '(.extra["branch-alias"] // {}) | to_entries[0].value // empty' package/composer.json)
@@ -292,6 +300,10 @@ jobs:
                   SKELETON_VERSION: ${{ needs.plan.outputs.skeleton-version }}
                   REMOVE: ${{ inputs.remove-packages }}
               run: |
+                  if [ "$(jq -r .name package/composer.json)" != "$NAME" ]; then
+                      jq --arg n "$NAME" '.name = $n | if .replace then .replace |= del(.[$n]) else . end' package/composer.json > package/composer.json.new
+                      mv -f package/composer.json.new package/composer.json
+                  fi
                   repo=$(jq -nc --arg url "$GITHUB_WORKSPACE/package" --arg n "$NAME" --arg v "$VERSION" \
                          '{type: "path", url: $url, options: {symlink: false, versions: {($n): $v}}}')
                   if [ "$KIND" = skeleton ] && [ "$SOURCE" = checkout ]; then
