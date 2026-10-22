@@ -174,20 +174,22 @@ env:
     COMPOSER_MEMORY_LIMIT: -1
 
 jobs:
-    browser-tests:
+    plan:
         runs-on: ubuntu-latest
-        timeout-minutes: ${{ inputs.timeout }}
+        outputs:
+            skip: ${{ steps.plan.outputs.skip }}
+            name: ${{ steps.plan.outputs.name }}
+            kind: ${{ steps.plan.outputs.kind }}
+            source: ${{ steps.plan.outputs.source }}
+            version: ${{ steps.plan.outputs.version }}
+            skeleton: ${{ steps.plan.outputs.skeleton }}
+            skeleton-version: ${{ steps.plan.outputs.skeleton-version }}
         steps:
             - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
               with:
                   path: package
-
-            - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-              with:
-                  repository: se7enxweb/gh-workflows
-                  ref: main
-                  path: .gh-workflows
-                  sparse-checkout: actions/exponential-browser-tests
+                  sparse-checkout: composer.json
+                  sparse-checkout-cone-mode: false
 
             - name: Record the requested setup
               env:
@@ -225,19 +227,44 @@ jobs:
                   # source: the checkout, or a released version when one was asked for.
                   if [ -n "$PROJECT_VERSION" ]; then source=release; version="$PROJECT_VERSION"; else source=checkout; version="$branch"; fi
                   if [ -z "$SKELETON" ]; then
-                      case "$alias" in
-                          4.*) SKELETON=se7enxweb/exponential-platform-v4x-dxp-skeleton ;;
+                      line="${GITHUB_BASE_REF:-$GITHUB_REF_NAME}"
+                      case "$alias $line" in
+                          4.*|*" 4."*) SKELETON=se7enxweb/exponential-platform-v4x-dxp-skeleton ;;
                           *)   SKELETON=se7enxweb/exponential-platform-dxp-skeleton ;;
                       esac
                   fi
                   [ -z "$SKELETON_VERSION" ] && SKELETON_VERSION="dev-master"
+                  skip=false
+                  if [ "$kind" = package ] && [ -z "${{ inputs.skeleton }}" ] && { case "${GITHUB_BASE_REF:-$GITHUB_REF_NAME} $alias" in 3.*|*" 3."*) true ;; *) false ;; esac; }; then
+                      # There is no Exponential Platform skeleton for the 3.x line.
+                      skip=true
+                      echo "::notice::No Exponential Platform skeleton exists for ${name} ${alias}; browser tests skipped."
+                  fi
                   [ "$kind" = skeleton ] && SKELETON="$name" && SKELETON_VERSION="$version"
                   {
                       echo "name=$name"; echo "type=$type"; echo "branch=$branch"; echo "alias=$alias"
+                      echo "skip=$skip"
                       echo "kind=$kind"; echo "source=$source"; echo "version=$version"
                       echo "skeleton=$SKELETON"; echo "skeleton-version=$SKELETON_VERSION"
                   } | tee -a "$GITHUB_OUTPUT"
                   echo "- Installed: \`${SKELETON}:${SKELETON_VERSION}\` with \`${name}:${version}\` (${kind}, from the ${source}${alias:+, alias $alias})" >> "$GITHUB_STEP_SUMMARY"
+
+    browser-tests:
+        needs: plan
+        if: needs.plan.outputs.skip != 'true'
+        runs-on: ubuntu-latest
+        timeout-minutes: ${{ inputs.timeout }}
+        steps:
+            - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+              with:
+                  path: package
+
+            - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+              with:
+                  repository: se7enxweb/gh-workflows
+                  ref: main
+                  path: .gh-workflows
+                  sparse-checkout: actions/exponential-browser-tests
 
             - name: Setup PHP
               uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
@@ -257,12 +284,12 @@ jobs:
 
             - name: Create the project
               env:
-                  NAME: ${{ steps.plan.outputs.name }}
-                  KIND: ${{ steps.plan.outputs.kind }}
-                  SOURCE: ${{ steps.plan.outputs.source }}
-                  VERSION: ${{ steps.plan.outputs.version }}
-                  SKELETON: ${{ steps.plan.outputs.skeleton }}
-                  SKELETON_VERSION: ${{ steps.plan.outputs.skeleton-version }}
+                  NAME: ${{ needs.plan.outputs.name }}
+                  KIND: ${{ needs.plan.outputs.kind }}
+                  SOURCE: ${{ needs.plan.outputs.source }}
+                  VERSION: ${{ needs.plan.outputs.version }}
+                  SKELETON: ${{ needs.plan.outputs.skeleton }}
+                  SKELETON_VERSION: ${{ needs.plan.outputs.skeleton-version }}
                   REMOVE: ${{ inputs.remove-packages }}
               run: |
                   repo=$(jq -nc --arg url "$GITHUB_WORKSPACE/package" --arg n "$NAME" --arg v "$VERSION" \
@@ -297,7 +324,7 @@ jobs:
               working-directory: project
               run: |
                   composer install --no-progress
-                  if [ "${{ steps.plan.outputs.kind }}" = package ]; then composer show "${{ steps.plan.outputs.name }}"; else composer show --self | head -n 12; fi
+                  if [ "${{ needs.plan.outputs.kind }}" = package ]; then composer show "${{ needs.plan.outputs.name }}"; else composer show --self | head -n 12; fi
                   [ -f .env ] && cat .env.local >> .env || cp .env.local .env
 
             - name: Install the database
