@@ -425,6 +425,7 @@ jobs:
                           mv -f package.json.new package.json
                       fi
                       yarn install --non-interactive --network-timeout 600000
+                      echo "Installed: webpack $(node -p "require('webpack/package.json').version" 2>/dev/null), Encore $(node -p "require('@symfony/webpack-encore/package.json').version" 2>/dev/null)"
                       if jq -e '.scripts["ibexa:build"]' package.json >/dev/null; then yarn ibexa:build; fi
                       # The site (app) build is what a fresh project runs first; it must work,
                       # including the copyFiles step that copies assets/images.
