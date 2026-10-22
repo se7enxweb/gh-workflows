@@ -13,6 +13,7 @@ name: Assign Pull Request to maintainers
 #   1. .github/maintainers.json of the base branch (never the PR's own copy)
 #   2. <map-repository>/<owner>/<repo>/maintainers, default se7enxweb/pr-assignees
 #   3. none: the repository owner is assigned when it is a user account
+# An "extension" of "*" matches every pull request, even one without files.
 # Format: {"params": [{"extension": "<regex on file names>", "assignee": "login1,login2"}, ...]}
 
 on:
@@ -61,7 +62,7 @@ jobs:
             echo "Maintainers from ${MAP_REPOSITORY}"
           elif [ "$OWNER_TYPE" = "User" ]; then
             echo "No maintainers list; assigning the repository owner ${OWNER}"
-            map=$(jq -nc --arg o "$OWNER" '{params: [{extension: ".", assignee: $o}]}')
+            map=$(jq -nc --arg o "$OWNER" '{params: [{extension: "*", assignee: $o}]}')
           else
             echo "::notice::No maintainers list for ${REPO}; nothing to assign."
             exit 0
@@ -70,7 +71,7 @@ jobs:
           assignees=""
           while IFS=$'\t' read -r extension assignee; do
             [ -z "$extension" ] && continue
-            if printf '%s\n' "$files" | grep -qP -- "$extension"; then
+            if [ "$extension" = "*" ] || printf '%s\n' "$files" | grep -qP -- "$extension"; then
               assignees="${assignees:+$assignees,}${assignee}"
             fi
           done < <(printf '%s' "$map" | jq -r '.params[] | [.extension, .assignee] | @tsv')
