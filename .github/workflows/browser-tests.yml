@@ -343,6 +343,10 @@ jobs:
                   NODE_RESOLUTIONS: ${{ inputs.node-resolutions }}
               run: |
                   php bin/console assets:install --symlink --relative public
+                  # 4.x projects generate their encore configs (var/encore) with this command.
+                  if php bin/console list ibexa 2>/dev/null | grep -q 'ibexa:encore:compile'; then
+                      php bin/console ibexa:encore:compile
+                  fi
                   if [ -f package.json ]; then
                       corepack enable || true
                       if [ ! -f yarn.lock ] && [ -n "$NODE_RESOLUTIONS" ]; then
