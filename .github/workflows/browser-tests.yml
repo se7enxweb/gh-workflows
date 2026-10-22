@@ -343,6 +343,10 @@ jobs:
                       # Development versions of the tested package and its siblings must resolve.
                       composer config minimum-stability dev
                       composer config prefer-stable true
+                      # Recipes run only when the root requires symfony/flex.
+                      if ! jq -e '.require["symfony/flex"]' composer.json >/dev/null; then
+                          composer require "symfony/flex:^2" --no-update
+                      fi
                       [ "$SOURCE" = checkout ] && composer config repositories.tested "$repo"
                       for p in $REMOVE; do composer remove "$p" --no-update; done
                       composer require "${NAME}:${VERSION}" --no-update
