@@ -210,14 +210,15 @@ jobs:
                   branch=$(jq -r '(.extra["branch-alias"] // {}) | keys[0] // empty' package/composer.json)
                   alias=$(jq -r '(.extra["branch-alias"] // {}) | to_entries[0].value // empty' package/composer.json)
                   [ -z "$branch" ] && branch="dev-${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}"
-                  if [ -n "$PROJECT_VERSION" ]; then
-                      # A released version was asked for: install exactly that.
-                      mode=release
-                  elif [ "$type" = "project" ]; then
-                      mode=self
+                  # kind: a Symfony project (skeleton) is installed itself, anything
+                  # else is put into a project created from the skeleton.
+                  if [ "$type" = "project" ] && jq -e ".extra.symfony" package/composer.json >/dev/null; then
+                      kind=skeleton
                   else
-                      mode=package
+                      kind=package
                   fi
+                  # source: the checkout, or a released version when one was asked for.
+                  if [ -n "$PROJECT_VERSION" ]; then source=release; version="$PROJECT_VERSION"; else source=checkout; version="$branch"; fi
                   if [ -z "$SKELETON" ]; then
                       case "$alias" in
                           4.*) SKELETON=se7enxweb/exponential-platform-v4x-dxp-skeleton ;;
@@ -225,13 +226,13 @@ jobs:
                       esac
                   fi
                   [ -z "$SKELETON_VERSION" ] && SKELETON_VERSION="dev-master"
-                  [ "$mode" = self ] && SKELETON="$name" && SKELETON_VERSION="$branch"
-                  [ "$mode" = release ] && SKELETON="$name" && SKELETON_VERSION="$PROJECT_VERSION"
+                  [ "$kind" = skeleton ] && SKELETON="$name" && SKELETON_VERSION="$version"
                   {
                       echo "name=$name"; echo "type=$type"; echo "branch=$branch"; echo "alias=$alias"
-                      echo "mode=$mode"; echo "skeleton=$SKELETON"; echo "skeleton-version=$SKELETON_VERSION"
+                      echo "kind=$kind"; echo "source=$source"; echo "version=$version"
+                      echo "skeleton=$SKELETON"; echo "skeleton-version=$SKELETON_VERSION"
                   } | tee -a "$GITHUB_OUTPUT"
-                  echo "- Installed: \`${SKELETON}:${SKELETON_VERSION}\` with \`${name}\` (${branch}, ${alias:-no alias}) as *${mode}*" >> "$GITHUB_STEP_SUMMARY"
+                  echo "- Installed: \`${SKELETON}:${SKELETON_VERSION}\` with \`${name}:${version}\` (${kind}, from the ${source}${alias:+, alias $alias})" >> "$GITHUB_STEP_SUMMARY"
 
             - name: Setup PHP
               uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
@@ -252,25 +253,26 @@ jobs:
             - name: Create the project
               env:
                   NAME: ${{ steps.plan.outputs.name }}
-                  MODE: ${{ steps.plan.outputs.mode }}
-                  BRANCH: ${{ steps.plan.outputs.branch }}
+                  KIND: ${{ steps.plan.outputs.kind }}
+                  SOURCE: ${{ steps.plan.outputs.source }}
+                  VERSION: ${{ steps.plan.outputs.version }}
                   SKELETON: ${{ steps.plan.outputs.skeleton }}
                   SKELETON_VERSION: ${{ steps.plan.outputs.skeleton-version }}
                   REMOVE: ${{ inputs.remove-packages }}
               run: |
-                  repo=$(jq -nc --arg url "$GITHUB_WORKSPACE/package" --arg n "$NAME" --arg v "$BRANCH" \
+                  repo=$(jq -nc --arg url "$GITHUB_WORKSPACE/package" --arg n "$NAME" --arg v "$VERSION" \
                          '{type: "path", url: $url, options: {symlink: false, versions: {($n): $v}}}')
-                  if [ "$MODE" = self ]; then
+                  if [ "$KIND" = skeleton ] && [ "$SOURCE" = checkout ]; then
                       composer create-project "$SKELETON" project "$SKELETON_VERSION" --repository="$repo" --no-install --no-scripts
                   else
                       composer create-project "$SKELETON" project "$SKELETON_VERSION" --no-install --no-scripts
                   fi
                   cd project
                   composer config allow-plugins true
-                  if [ "$MODE" = package ]; then
-                      composer config repositories.tested "$repo"
+                  if [ "$KIND" = package ]; then
+                      [ "$SOURCE" = checkout ] && composer config repositories.tested "$repo"
                       for p in $REMOVE; do composer remove "$p" --no-update; done
-                      composer require "${NAME}:${BRANCH}" --no-update
+                      composer require "${NAME}:${VERSION}" --no-update
                   fi
                   cat composer.json
 
